@@ -232,8 +232,11 @@ class EvalClientOutputTransport(WebsocketClientOutputTransport):
     async def write_audio_frame(self, frame: OutputAudioRawFrame) -> bool:
         """Queue the user audio for the send task.
 
-        Returns False so the media sender does not push this un-paced frame
-        downstream; the send task pushes the paced frames instead.
+        Returns True: the frame is taken. The media sender reads False as a
+        failed write and cancels its audio task after
+        ``audio_out_max_consecutive_failures`` of them, which would truncate
+        the utterance. The frame it then pushes downstream is the un-paced
+        one; the send task's paced frames follow it.
         """
         if self._session.is_closing or not self._session.is_connected:
             return False
@@ -242,7 +245,7 @@ class EvalClientOutputTransport(WebsocketClientOutputTransport):
         if self._recorder is not None:
             self._recorder.add_user(frame.audio, frame.sample_rate)
         self._pending.extend(frame.audio)
-        return False
+        return True  # TALKQ-PATCH: DOGRA-182
 
     async def _send_task_handler(self):
         """Send one ~40ms frame every tick: queued audio, or silence when idle."""
