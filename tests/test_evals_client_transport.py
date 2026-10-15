@@ -21,11 +21,14 @@ from pipecat.evals.client_transport import (
     _RecorderTrack,
 )
 from pipecat.frames.frames import (
+    CancelWorkerFrame,
     InputAudioRawFrame,
     InputTransportMessageFrame,
     InterruptionFrame,
+    OutputAudioRawFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
+from pipecat.tests.utils import run_test
 from pipecat.transports.websocket.client import WebsocketClientParams
 
 
@@ -157,6 +160,53 @@ class TestRecorderTrack(unittest.IsolatedAsyncioTestCase):
         track = self._track(self._paced(12.0, 2))
         out = await track.rendered(self.SR, 10.0)
         self.assertEqual(out, b"\x00" * (2 * self.SR * 2) + self.CHUNK * 2)
+
+
+class TestEvalHarnessOutputThroughMediaSender(unittest.IsolatedAsyncioTestCase):
+    """The base MediaSender must keep delivering audio to the eval output."""
+
+    SR = 16000
+
+    async def test_audio_task_survives_more_than_the_failure_limit_of_frames(self):
+        """DOGRA-182: write_audio_frame returning False counted as a failed
+        write, so after audio_out_max_consecutive_failures (10) frames the
+        MediaSender cancelled its audio task and truncated the utterance."""
+        session = types.SimpleNamespace(
+            is_closing=False,
+            is_connected=True,
+            setup=AsyncMock(),
+            connect=AsyncMock(),
+            disconnect=AsyncMock(),
+        )
+        params = WebsocketClientParams(audio_out_enabled=True)
+        out = EvalClientOutputTransport(None, session, params)
+        out._send_frame = AsyncMock()  # nothing to serialize in this test
+
+        taken: list[bool] = []
+        real_write = out.write_audio_frame
+
+        async def spy(frame):
+            taken.append(await real_write(frame))
+            return taken[-1]
+
+        out.write_audio_frame = spy
+
+        count = params.audio_out_max_consecutive_failures + 5
+        chunk = b"\x01\x00" * (self.SR * 4 // 100)  # 40ms: one MediaSender write
+        frames = [
+            OutputAudioRawFrame(audio=chunk, sample_rate=self.SR, num_channels=1)
+            for _ in range(count)
+        ]
+
+        _, up = await run_test(out, frames_to_send=frames)
+
+        # More writes than the failure limit reached the transport, all taken.
+        self.assertGreater(len(taken), params.audio_out_max_consecutive_failures)
+        self.assertTrue(all(taken))
+        self.assertFalse(
+            [f for f in up if isinstance(f, CancelWorkerFrame)],
+            "the media sender gave up on the audio output",
+        )
 
 
 class TestEvalHarnessInput(unittest.IsolatedAsyncioTestCase):
