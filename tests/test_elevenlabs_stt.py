@@ -19,6 +19,8 @@ from pipecat.services.elevenlabs.stt import (
     language_to_elevenlabs_language,
 )
 from pipecat.transcriptions.language import Language
+from pipecat.utils.asyncio.task_manager import TaskManager
+from tests.frame_processor_helpers import frame_processor_setup
 
 COMMITTED_TEXT = "Hello. This is a test of the speech-to-text service."
 
@@ -283,3 +285,43 @@ async def test_elevenlabs_realtime_plain_committed_emitted_without_options():
     assert len(captured) == 1
     assert captured[0].text == COMMITTED_TEXT
     assert captured[0].language is None
+
+
+@pytest.mark.asyncio
+async def test_connect_creates_receive_task_when_connect_fails(monkeypatch):
+    """After the receive loop gives up, _connect() must mint a new one even
+    without a socket, so the loop's own reconnect path can retry."""
+    service = ElevenLabsRealtimeSTTService(api_key="test-key", sample_rate=16000)
+    service._setup = frame_processor_setup(TaskManager())
+    service._task_manager = TaskManager()
+
+    # The previous receive loop exited; no websocket survived.
+    service._receive_task = None
+    service._websocket = None
+
+    async def failing_connect_websocket():
+        service._websocket = None
+
+    monkeypatch.setattr(service, "_connect_websocket", failing_connect_websocket)
+
+    await service._connect()
+
+    assert service._receive_task is not None
+    assert not service._receive_task.done()
+
+    await service._disconnect()
+
+
+@pytest.mark.asyncio
+async def test_run_stt_with_no_socket_yields_without_reconnecting(monkeypatch):
+    service = ElevenLabsRealtimeSTTService(api_key="test-key", sample_rate=16000)
+    service._websocket = None
+
+    async def unexpected_connect():
+        raise AssertionError("run_stt must not reconnect; the receive loop owns that")
+
+    monkeypatch.setattr(service, "_connect", unexpected_connect)
+
+    frames = [frame async for frame in service.run_stt(b"audio-bytes")]
+
+    assert frames == [None]
