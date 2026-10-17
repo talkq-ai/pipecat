@@ -536,6 +536,37 @@ async def test_receive_messages_allows_final_transcription_without_language(monk
     assert traced_transcriptions == [("Tell me a joke.", True, None)]
 
 
+@pytest.mark.asyncio
+async def test_connect_sends_authorization_header_and_omits_message_api_key(monkeypatch):
+    connect_calls = []
+
+    async def fake_websocket_connect(*args, **kwargs):
+        connect_calls.append(kwargs)
+        return _FakeWebsocket([])
+
+    monkeypatch.setattr(
+        "pipecat.services.websocket_service.websocket_connect", fake_websocket_connect
+    )
+
+    service = SonioxSTTService(api_key="test-key")
+
+    await service._connect_websocket()
+
+    assert connect_calls[0].get("additional_headers") == {"Authorization": "Bearer test-key"}
+
+    sent = [json.loads(payload) for payload in _sent_payloads(service._websocket)]
+    assert len(sent) == 1
+    assert "api_key" not in sent[0]
+    assert sent[0]["model"] == service._settings.model
+
+    # A dropped socket reconnects with the same header.
+    service._websocket.state = State.CLOSED
+    await service._connect_websocket()
+
+    assert len(connect_calls) == 2
+    assert connect_calls[1].get("additional_headers") == {"Authorization": "Bearer test-key"}
+
+
 def _connected_service():
     """Build a service holding an open fake socket, without touching the network."""
     service = SonioxSTTService(api_key="test-key")

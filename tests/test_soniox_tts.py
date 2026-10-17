@@ -4,7 +4,11 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
+import json
 import unittest
+from unittest.mock import AsyncMock
+
+import pytest
 
 from pipecat.frames.frames import (
     AggregatedTextFrame,
@@ -223,3 +227,44 @@ class TestSonioxUpdateSettingsFinalizesOldContext(unittest.IsolatedAsyncioTestCa
 
         self.assertEqual([s.frame.text for s in seq._slots], ["Hi there"])
         self.assertEqual(service._turn_context_id, "ctx-new")
+
+
+class _FakeWebsocket:
+    def __init__(self):
+        self.send = AsyncMock()
+
+    async def close(self):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_connect_sends_authorization_header_and_omits_config_api_key(monkeypatch):
+    connect_calls = []
+
+    async def fake_websocket_connect(*args, **kwargs):
+        connect_calls.append(kwargs)
+        return _FakeWebsocket()
+
+    monkeypatch.setattr(
+        "pipecat.services.websocket_service.websocket_connect", fake_websocket_connect
+    )
+
+    service = SonioxTTSService(api_key="test-key")
+
+    await service._connect_websocket()
+
+    assert connect_calls[0].get("additional_headers") == {"Authorization": "Bearer test-key"}
+
+    # The per-stream config message no longer carries the key.
+    await service._send_config("ctx-1")
+    sent = [json.loads(call.args[0]) for call in service._websocket.send.await_args_list]
+    assert len(sent) == 1
+    assert "api_key" not in sent[0]
+    assert sent[0]["stream_id"] == "ctx-1"
+
+    # A fresh connection after the socket drops re-sends the header.
+    service._websocket = None
+    await service._connect_websocket()
+
+    assert len(connect_calls) == 2
+    assert connect_calls[1].get("additional_headers") == {"Authorization": "Bearer test-key"}
